@@ -1,0 +1,18 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://127.0.0.1:8080
+functions:
+  objectmover:
+    lang: csharp-httprequest
+    handler: ./objectmover
+    image: whitmell/objectmover:latest
+    environment:
+      
+      mongo_endpoint: 10.0.1.32:27017
+      mongo_database: elaps
+      mongo_collection: tasks
+      minio_endpoint: 10.0.1.31:9000
+      minio_access_key: minioadmin
+      minio_secret_key: minioadmin
+
