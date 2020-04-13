@@ -1,6 +1,8 @@
+using Confluent.Kafka;
 using Microsoft.AspNetCore.Http;
 using Minio;
 using Minio.DataModel;
+using Minio.Exceptions;
 using MongoDB.Bson;
 using MongoDB.Bson.IO;
 using MongoDB.Driver;
@@ -27,7 +29,7 @@ namespace Function
                                 Environment.GetEnvironmentVariable("minio_access_key"),
                                 Environment.GetEnvironmentVariable("minio_secret_key")
                                 );
-                moveObject(input, minio).ContinueWith(x =>
+                writeKafkaAsync(input, minio).ContinueWith(x =>
                 {
                     if (x.IsFaulted)
                         result = x.Exception.Message;
@@ -42,7 +44,7 @@ namespace Function
             
             return (200, result);
         }
-
+        
         private JObject getTaskFromDb(string key)
         {
             JObject result = new JObject();
@@ -64,68 +66,90 @@ namespace Function
             return result;
         }
         
-        private async Task<string> moveObject(string input, MinioClient minio)
+        
+        private async Task<string> writeKafkaAsync(string input, MinioClient minio)
         {
+            // Read task from db
             var request = getTaskFromDb(input);
 
-            if(request.ContainsKey("error"))
+            if (request.ContainsKey("error"))
             {
                 return request.ToString();
             }
 
             var bucket = request["params"]["bucket"].Value<string>();
             var file = request["params"]["object"].Value<string>();
-            var newBucket = request["params"]["newBucket"].Value<string>();
+            var topic = request["params"]["topic"].Value<string>();
 
-            bool found = await minio.BucketExistsAsync(newBucket);
-            if (!found)
+
+            //Get object from minio, write to string
+            var data = string.Empty;
+            try
             {
-                await minio.MakeBucketAsync(newBucket);
+                // Check whether the object exists 
+                await minio.StatObjectAsync(bucket, file);
+                
+                // Get input stream to have content of 'my-objectname' from 'my-bucketname'
+                await minio.GetObjectAsync(bucket, file,
+                                                    (x) =>
+                                                    {
+                                                        data = new StreamReader(x).ReadToEnd();
+                                                    });
             }
-            string result = string.Empty;
-            minio.CopyObjectAsync(bucket, file, newBucket).ContinueWith((x) =>
+            catch (MinioException ex)
             {
-                if (x.IsFaulted)
-                {
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine(x.Exception.Message);
-                    foreach (var e in x.Exception.InnerExceptions)
-                    {
-                        sb.AppendLine(e.Message);
-                    }
+                Console.WriteLine("Error occurred: " + ex.Message);
+            }
 
-                    result = sb.ToString();
-                }
-                else
-                {
-                    Console.WriteLine($"Object {file} copied to {newBucket} successfully");
+            if (string.IsNullOrEmpty(data))
+            {
+                return $"Object {file} not found in {bucket}";
+            }
 
-                    var key = Guid.NewGuid().ToString();
-                    var callJson = new JObject(
-                    new JProperty("_key", key),
-                        new JProperty("params", new JObject(
-                            new JProperty("bucket", bucket),
-                            new JProperty("object", file),
-                            new JProperty("topic", "augury"))
-                        ));
-                    writeTaskToDb(callJson);
-                    string callResponse = string.Empty;
-                    makeCallAsync("kafkawriter", key).ContinueWith(c =>
+            //Write to kafka
+            string result = string.Empty;
+
+            var config = new ProducerConfig
+            {
+                BootstrapServers = Environment.GetEnvironmentVariable("kafka_endpoint"),
+                MessageMaxBytes = 1000000000
+            };
+
+            Action<DeliveryReport<Null, string>> handler = x =>
+            {
+                result = !x.Error.IsError ? $"Delivered message to {x.TopicPartitionOffset}" : $"Delivery Error: {x.Error.Reason}";
+                Console.WriteLine(result);
+            };
+
+            using (var producer = new ProducerBuilder<Null, string>(config).Build())
+            {
+                try
+                {
+                    var t = producer.ProduceAsync(topic, new Message<Null, string> { Value = data });
+                    t.ContinueWith(x =>
                     {
-                        if(x.IsFaulted)
-                            callResponse = $"Error calling objectmover for {file}: {c.Exception.Message}";
+                        if (x.IsFaulted)
+                        {
+                            result = $"Error writing to kafka: {x.Exception.Message}";
+                            Console.WriteLine(result);
+                        }
                         else
-                            callResponse = c.Result;
-                        Console.WriteLine($"{input}: {callResponse}");
-                    }).Wait();
-                    result = callResponse;
+                        {
+                            result = $"Wrote to offset: {x.Result.Offset}";
+                            Console.WriteLine(result);
+                        }
+                    })
+                    .Wait();
                 }
-            })
-            .Wait();
+                catch (Exception ex)
+                {
+                    result = $"Error writing to kafka: {ex.Message}";
+                    Console.WriteLine(result);
+                }
+            }
             return result;
         }
-
-
+        
         private void writeTaskToDb(JObject json)
         {
             var client = new MongoClient(string.Format("mongodb://{0}", Environment.GetEnvironmentVariable("mongo_endpoint")));
@@ -141,10 +165,11 @@ namespace Function
             using ( var client = new HttpClient())
             {
                 var uri = new Uri($"http://gateway:8080/function/{function}");
+                // New code:
+                //HttpResponseMessage response = await client.GetAsync(uri);
                 HttpResponseMessage response = await client.PostAsync(uri, new StringContent(input, Encoding.UTF8, "text/plain"));
                 return await response.Content.ReadAsStringAsync();
             }
-
         }
     }
 }

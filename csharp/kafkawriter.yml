@@ -3,13 +3,15 @@ provider:
   name: openfaas
   gateway: http://127.0.0.1:8080
 functions:
-  objectmover:
+  kafkawriter:
     lang: csharp-httprequest
-    handler: ./objectmover
-    image: whitmell/objectmover:latest
+    handler: ./kafkawriter
+    image: whitmell/kafkawriter:latest
     environment:
       write_debug: true
       combine_output: false
+      kafka_endpoint: 10.103.50.230:9092
+      kafka_topic: augury
       mongo_endpoint: 10.0.1.32:27017
       mongo_database: elaps
       mongo_collection: tasks

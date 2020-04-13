@@ -1,0 +1,14 @@
+version: 1.0
+provider:
+  name: openfaas
+  gateway: http://127.0.0.1:8080
+functions:
+  startworkflow:
+    lang: csharp-httprequest
+    handler: ./startworkflow
+    image: startworkflow:latest
+    environment:
+      write_debug: true
+      combine_output: false
+      mongoEndpoint: 10.0.1.32:27017
+
